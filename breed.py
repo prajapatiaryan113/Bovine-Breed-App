@@ -1,212 +1,134 @@
 import streamlit as st
-import sqlite3, hashlib, os, json
-import numpy as np
+import sqlite3
+import hashlib
+import os
+import json
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing import image
-from PIL import Image
-from datetime import datetime
+import numpy as np
 
-# ================= Database Setup =================
-conn = sqlite3.connect("users.db", check_same_thread=False)
-conn.row_factory = sqlite3.Row
+# -------------------- SESSION INIT --------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+if "page" not in st.session_state:
+    st.session_state.page = "auth"
+
+# -------------------- DATABASE ------------------------
+DB_PATH = "users.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = conn.cursor()
 
-cur.execute("""CREATE TABLE IF NOT EXISTS users(
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT UNIQUE,
-    password TEXT,
-    name TEXT,
-    phone TEXT,
-    address TEXT
-)""")
+    password TEXT
+)
+""")
 
-cur.execute("""CREATE TABLE IF NOT EXISTS predictions(
+cur.execute("""
+CREATE TABLE IF NOT EXISTS predictions(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     breed TEXT,
     height REAL,
     weight REAL,
-    gender TEXT,
-    image_path TEXT,
     age REAL,
-    created_at TEXT,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-)""")
+    gender TEXT,
+    image_path TEXT
+)
+""")
 
 conn.commit()
 
-# ================= Utility Functions =================
-def hash_pw(p): 
+# -------------------- USER AUTH -----------------------
+def hash_password(p):
     return hashlib.sha256(p.encode()).hexdigest()
 
-def add_user(email, pw):
-    cur.execute("INSERT INTO users(email,password) VALUES(?,?)",
-                (email, hash_pw(pw)))
+def add_user(email, password):
+    cur.execute("INSERT INTO users (email, password) VALUES (?,?)", (email, hash_password(password)))
     conn.commit()
 
-def login_user(email, pw):
-    cur.execute("SELECT * FROM users WHERE email=? AND password=?",
-                (email, hash_pw(pw)))
-    row = cur.fetchone()
-    return dict(row) if row else None
+def login_user(email, password):
+    cur.execute("SELECT * FROM users WHERE email=? AND password=?", (email, hash_password(password)))
+    return cur.fetchone()
 
-def save_prediction(uid, breed, h, w, age, g, path):
-    cur.execute("""INSERT INTO predictions
-        (user_id,breed,height,weight,age,gender,image_path,created_at)
-        VALUES(?,?,?,?,?,?,?,?)""",
-        (uid, breed, h, w, age, g, path,
-         datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+# -------------------- MODEL LOADING -------------------
+MODEL_PATH = "bovine_breed_with_invalid.h5"
+CLASS_PATH = "bovine_breed_with_invalid_classes.json"
+
+if os.path.exists(MODEL_PATH) and os.path.exists(CLASS_PATH):
+    model = load_model(MODEL_PATH)
+    with open(CLASS_PATH) as f:
+        idx_to_class = {int(v): k for k, v in json.load(f).items()}
+else:
+    model = None
+    idx_to_class = {}
+    st.error("⚠ मॉडल लोड नहीं हुआ: Model files missing")
+
+# -------------------- PREDICTION ---------------------
+def predict_breed(img_path):
+    if not model:
+        st.error("Model not loaded")
+        return None
+    img = image.load_img(img_path, target_size=(224, 224))
+    x = image.img_to_array(img) / 255.0
+    x = np.expand_dims(x, axis=0)
+    pred = model.predict(x)
+    class_idx = np.argmax(pred)
+    return idx_to_class.get(class_idx, "Unknown")
+
+# -------------------- SAVE PREDICTION ----------------
+def save_prediction(user_id, breed, h, w, a, g, path):
+    cur.execute(
+        "INSERT INTO predictions (user_id, breed, height, weight, age, gender, image_path) VALUES (?,?,?,?,?,?,?)",
+        (user_id, breed, h, w, a, g, path)
+    )
     conn.commit()
 
-def get_records(uid):
-    cur.execute("""SELECT breed,height,weight,age,gender,image_path,created_at
-                   FROM predictions WHERE user_id=? ORDER BY id DESC""",
-                (uid,))
-    return cur.fetchall()
-
-def update_profile(uid,n,p,a):
-    cur.execute("UPDATE users SET name=?,phone=?,address=? WHERE id=?",
-                (n,p,a,uid))
-    conn.commit()
-
-# ================= Load Model =================
-MODEL = "bovine_breed_with_invalid.h5"
-CLASS = "bovine_breed_with_invalid_classes.json"
-try:
-    model = load_model(MODEL)
-    with open(CLASS) as f:
-        idx_to_class = {v:k for k,v in json.load(f).items()}
-except:
-    st.error("⚠ मॉडल लोड नहीं हुआ")
-    model, idx_to_class = None, {}
-
-def predict(img):
-    if model is None:
-        return "Unknown",0
-    img = img.resize((224,224))
-    arr = image.img_to_array(img)/255.0
-    arr = np.expand_dims(arr,0)
-    p = model.predict(arr)
-    idx = np.argmax(p[0])
-    return idx_to_class[idx], p[0][idx]*100
-
-# ================= Theme =================
-st.markdown("""
-<style>
-body {background:linear-gradient(135deg,#e6ffed,#ffffff,#d0f0fd);}
-.stButton>button{
-    background:#1e90ff;color:white;font-weight:bold;border-radius:8px;}
-.stButton>button:hover{background:#28a745;color:white;}
-</style>
-""", unsafe_allow_html=True)
-
-# ================= Session State =================
-if "user" not in st.session_state: st.session_state.user=None
-if "page" not in st.session_state: st.session_state.page="auth"
-
-# ================= Pages =================
+# -------------------- PAGE: AUTH ---------------------
 def page_auth():
-    st.header("Login / Signup")
-    opt = st.radio("Menu", ["Login", "Sign Up", "Skip"])
-    
-    if opt=="Sign Up":
-        e = st.text_input("Email")
-        p = st.text_input("Password", type="password")
-        if st.button("Create"):
-            try: 
-                add_user(e,p)
-                st.success("✅ Created")
-            except:
-                st.error("⚠ Email exists")
-                
-    elif opt=="Login":
-        e = st.text_input("Email")
-        p = st.text_input("Password", type="password")
+    st.header("Login / Sign Up")
+    option = st.radio("Menu", ["Login", "Sign Up", "Skip"])
+
+    if option == "Sign Up":
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        if st.button("Create Account"):
+            try:
+                add_user(email, password)
+                st.success("✅ Account Created")
+            except sqlite3.IntegrityError:
+                st.error("⚠ Email already exists")
+
+    elif option == "Login":
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
         if st.button("Login"):
-            u = login_user(e,p)
-            if u:
-                st.session_state.user = u
-                st.session_state.page="upload"
+            user = login_user(email, password)
+            if user:
+                st.session_state.user = user
+                st.session_state.page = "upload"
                 st.experimental_rerun()
             else:
-                st.error("Invalid")
-    else:
-        st.session_state.page="upload"
-        st.experimental_rerun()
+                st.error("⚠ Invalid credentials")
 
-def page_upload():
-    st.header("Upload / Capture")
-    up = st.file_uploader("Choose", ["jpg","jpeg","png"])
-    cam = st.camera_input("Camera")
-    
-    if up or cam:
-        img = Image.open(up if up else cam)
-        os.makedirs("temp", exist_ok=True)
-        path = os.path.join("temp", up.name if up else "captured.jpg")
-        img.save(path)
-        st.image(img, width=220)
-        
-        if st.button("🔍 Predict Breed"):
-            br, conf = predict(img)
-            st.success(f"Breed: {br} ({conf:.1f}%)")
-            
-            with st.form("save_form"):
-                breed = st.text_input("Edit Breed", br)
-                c1,c2,c3,c4 = st.columns(4)
-                with c1: h = st.number_input("Height(cm)",50.0,250.0,120.0)
-                with c2: w = st.number_input("Weight(kg)",50.0,1000.0,300.0)
-                with c3: a = st.number_input("Age(yrs)",0.0,25.0,3.0)
-                with c4: g = st.selectbox("Gender",["Male","Female"])
-                sub = st.form_submit_button("💾 Save Result")
-                
-                if sub:
-                    if st.session_state.user:
-                        save_prediction(st.session_state.user["id"], breed, h, w, a, g, path)
-                        st.success("Saved ✅")
-                    else:
-                        st.warning("Login first to save")
-
-def page_profile():
-    st.header("Profile")
-    u = st.session_state.user
-    if u:
-        n = st.text_input("Name", u.get("name") or "")
-        ph = st.text_input("Phone", u.get("phone") or "")
-        ad = st.text_area("Address", u.get("address") or "")
-        if st.button("💾 Save Profile"):
-            update_profile(u["id"], n, ph, ad)
-            st.success("Updated!")
-        if st.button("🚪 Logout"):
-            st.session_state.user=None
-            st.session_state.page="auth"
+    else:  # Skip
+        if st.button("Continue without login"):
+            st.session_state.page = "upload"
             st.experimental_rerun()
-    else:
-        st.warning("Please login")
 
-def page_records():
-    st.header("📂 Records")
-    if st.session_state.user:
-        rec = get_records(st.session_state.user["id"])
-        if rec:
-            for i,r in enumerate(rec,1):
-                st.write(f"**{i}. {r['breed']}** | "
-                         f"H:{r['height']} W:{r['weight']} "
-                         f"A:{r['age']} G:{r['gender']} | {r['created_at']}")
-                st.image(r["image_path"], width=150)
-        else:
-            st.info("No records")
-    else:
-        st.warning("Login to view")
+# -------------------- PAGE: UPLOAD -------------------
+def page_upload():
+    st.header("Bovine Breed Prediction")
+    uploaded_file = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
+    h = st.number_input("Height (cm)", 0.0, 500.0, 100.0)
+    w = st.number_input("Weight (kg)", 0.0, 2000.0, 200.0)
+    a = st.number_input("Age (years)", 0.0, 50.0, 2.0)
+    g = st.selectbox("Gender", ["Male", "Female"])
 
-# ================= Router =================
-pg = st.session_state.page
-if pg=="auth": page_auth()
-elif pg=="upload": page_upload()
-elif pg=="profile": page_profile()
-else: page_records()
-
-st.markdown("---")
-c1,c2,c3 = st.columns(3)
-if c1.button("🏠 Home"): st.session_state.page="upload"; st.experimental_rerun()
-if c2.button("👤 Profile"): st.session_state.page="profile"; st.experimental_rerun()
-if c3.button("📂 Records"): st.session_state.page="records"; st.experimental_rerun()
+    if uploaded_file:
+        save_path = os.path.join("uploads", uploaded_file.name)
+        os.makedirs("uploads", exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.g_
