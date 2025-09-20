@@ -1,6 +1,6 @@
 streamlit>=1.24
-tensorflow-cpu==2.20.0
-numpy>=1.25.2
+tensorflow-cpu==2.15.0
+numpy>=1.25
 pillow>=9.5
 pandas>=1.5
 matplotlib>=3.7
